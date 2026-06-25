@@ -1,14 +1,18 @@
-const User    = require('../models/User');
-const bcrypt  = require('bcryptjs');
-const jwt     = require('jsonwebtoken');
+const User = require('../models/User');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const { OAuth2Client } = require('google-auth-library'); // 👈 Ajout pour Google
 
-const JWT_SECRET  = process.env.JWT_SECRET || 'seenit_secret_key';
+const JWT_SECRET = process.env.JWT_SECRET || 'seenit_secret_key';
 const JWT_EXPIRES = '7d';
 
-// ── REGISTER ──────────────────────────────────────────────────────────────────
+// Initialisation du client Google avec ta variable d'environnement
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+// ── REGISTER CLASSIQUE ────────────────────────────────────────────────────────
 exports.register = async (req, res) => {
   try {
-    const { email, password, name } = req.body;
+    const { email, password, username } = req.body; // Changé 'name' en 'username'
 
     if (!email || !password)
       return res.status(400).json({ message: 'Email et mot de passe requis' });
@@ -18,13 +22,14 @@ exports.register = async (req, res) => {
       return res.status(409).json({ message: 'Cet email est déjà utilisé' });
 
     const hash = await bcrypt.hash(password, 12);
-    const user = await User.create({ email, password: hash, name });
+    // iconique sera 'false' par défaut grâce au modèle
+    const user = await User.create({ email, password: hash, username });
 
     const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
 
     res.status(201).json({
       token,
-      user: { id: user._id, email: user.email, name: user.name, theme: user.theme }
+      user: { id: user._id, email: user.email, username: user.username, theme: user.theme, iconique: user.iconique }
     });
   } catch (err) {
     console.error(err);
@@ -32,14 +37,15 @@ exports.register = async (req, res) => {
   }
 };
 
-// ── LOGIN ─────────────────────────────────────────────────────────────────────
+// ── LOGIN CLASSIQUE ───────────────────────────────────────────────────────────
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
     const user = await User.findOne({ email });
-    if (!user)
-      return res.status(401).json({ message: 'Identifiants incorrects' });
+    // On vérifie aussi s'il a un mot de passe (les comptes Google n'en ont pas forcément)
+    if (!user || !user.password)
+      return res.status(401).json({ message: 'Identifiants incorrects ou compte Google' });
 
     const match = await bcrypt.compare(password, user.password);
     if (!match)
@@ -53,11 +59,58 @@ exports.login = async (req, res) => {
 
     res.json({
       token,
-      user: { id: user._id, email: user.email, name: user.name, theme: user.theme }
+      user: { id: user._id, email: user.email, username: user.username, theme: user.theme, iconique: user.iconique }
     });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Erreur serveur' });
+  }
+};
+
+// ── INSCRIPTION / CONNEXION GOOGLE (NOUVEAU) ──────────────────────────────────
+exports.googleAuth = async (req, res) => {
+  try {
+    const { credential } = req.body;
+
+    // 1. On demande à Google si le token est valide
+    const ticket = await client.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+    
+    // 2. On récupère les infos certifiées par Google
+    const { email, name, sub: googleId } = ticket.getPayload();
+
+    // 3. On cherche si l'utilisateur existe déjà
+    let user = await User.findOne({ email });
+
+    if (!user) {
+      // S'il n'existe pas, c'est une INSCRIPTION : on le crée
+      user = await User.create({
+        username: name,
+        email: email,
+        googleId: googleId,
+        // Pas de mot de passe, et iconique est false par défaut !
+      });
+    } else {
+      // S'il existe (CONNEXION), on met à jour son lastSeen et son googleId au cas où
+      user.lastSeen = new Date();
+      if (!user.googleId) user.googleId = googleId;
+      await user.save();
+    }
+
+    // 4. On génère NOTRE token (comme pour un login classique)
+    const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
+    
+    // 5. On renvoie la même structure que les autres routes
+    res.status(200).json({ 
+      token, 
+      user: { id: user._id, email: user.email, username: user.username, theme: user.theme, iconique: user.iconique } 
+    });
+
+  } catch (error) {
+    console.error("Erreur Google Auth:", error);
+    res.status(500).json({ message: "Erreur lors de l'authentification Google" });
   }
 };
 
@@ -80,7 +133,7 @@ exports.verifyToken = async (req, res) => {
     await user.save();
 
     res.json({
-      user: { id: user._id, email: user.email, name: user.name, theme: user.theme }
+      user: { id: user._id, email: user.email, username: user.username, theme: user.theme, iconique: user.iconique }
     });
   } catch (err) {
     res.status(500).json({ message: 'Erreur serveur' });
