@@ -69,31 +69,44 @@ exports.googleAuth = async (req, res) => {
   console.log("Corps de la requête reçu par Google Auth:", req.body); // 👈 Pour le débogage
 
   try {
-    const { credential } = req.body;
+    // On récupère le credential ainsi que l'email et le nom envoyés par le frontend
+    const { credential, email: frontEmail, name: frontName } = req.body;
 
-    const ticket = await client.verifyIdToken({
-      idToken: credential,
-      audience: process.env.GOOGLE_CLIENT_ID,
-    });
+    if (!credential) {
+      return res.status(400).json({ message: "Jeton d'authentification manquant." });
+    }
+
+    // 💡 Validation de l'Access Token (ya29...) directement auprès des serveurs Google
+    const tokenInfo = await client.getTokenInfo(credential);
     
-    const { email, name, sub: googleId } = ticket.getPayload();
+    // On extrait l'email sécurisé et l'identifiant unique (sub) validés par Google
+    const email = tokenInfo.email;
+    const googleId = tokenInfo.sub;
+    
+    // Comme getTokenInfo ne renvoie pas toujours le nom du profil, on utilise celui du front en priorité
+    const name = frontName || "Utilisateur SeenIt";
 
+    // --- TA LOGIQUE DE BASE DE DONNÉES (Inchangée) ---
     let user = await User.findOne({ email });
 
     if (!user) {
+      // Si l'utilisateur n'existe pas, on le crée
       user = await User.create({
         username: name,
         email: email,
         googleId: googleId,
       });
     } else {
+      // S'il existe, on met à jour sa dernière connexion et son googleId s'il ne l'avait pas
       user.lastSeen = new Date();
       if (!user.googleId) user.googleId = googleId;
       await user.save();
     }
 
+    // Génération de ton token JWT pour SeenIt
     const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
     
+    // Réponse propre envoyée au frontend
     res.status(200).json({ 
       token, 
       user: { id: user._id, email: user.email, username: user.username, theme: user.theme, iconique: user.iconique } 
