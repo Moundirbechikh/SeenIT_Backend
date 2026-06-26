@@ -1,5 +1,6 @@
 const Film     = require('../models/Film');
 const UserFilm = require('../models/UserFilm');
+const User     = require('../models/User'); // 🧠 Importé pour le check Iconic
 
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
 const TMDB_BASE    = 'https://api.themoviedb.org/3';
@@ -11,6 +12,26 @@ const TMDB_GENRES = {
   14: 'Fantastique', 36: 'Histoire', 27: 'Horreur', 10402: 'Musique',
   9648: 'Mystère', 10749: 'Romance', 878: 'Sci-Fi',
   10770: 'Téléfilm', 53: 'Thriller', 10752: 'Guerre', 37: 'Western',
+};
+
+// ── HELPER : vérifie si l'user doit débloquer Iconic ────────────────────────
+const checkAndUnlockIconic = async (userId) => {
+  try {
+    // Compte tous les films archivés par cet utilisateur
+    const count = await UserFilm.countDocuments({ userId });
+
+    if (count >= 100) {
+      // Débloque Iconic si ce n'est pas déjà fait
+      await User.findByIdAndUpdate(
+        userId,
+        { $set: { iconique: true } },
+        { new: false } // Pas besoin de récupérer le document modifié ici
+      );
+    }
+  } catch (err) {
+    console.error('checkAndUnlockIconic error:', err);
+    // Non-bloquant : on ne fait pas planter la requête principale d'ajout de film
+  }
 };
 
 // ── HELPER : credits TMDB ────────────────────────────────────────────────────
@@ -93,7 +114,18 @@ exports.addFilm = async (req, res) => {
       watchedAt:  new Date(), // date d'archivage = aujourd'hui
     });
 
-    res.status(201).json({ userFilm, film });
+    // 🏆 Déclenchement automatique de la vérification des 100 films
+    await checkAndUnlockIconic(req.userId);
+
+    // Récupération de l'état actuel de l'utilisateur pour informer le front en direct
+    const updatedUser = await User.findById(req.userId).select('iconique');
+
+    // Renvoie userFilm, film ET le flag iconique mis à jour (true/false)
+    res.status(201).json({ 
+      userFilm, 
+      film, 
+      iconique: updatedUser ? updatedUser.iconique : false 
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Erreur serveur' });
@@ -101,7 +133,7 @@ exports.addFilm = async (req, res) => {
 };
 
 // ── GET /api/films/search ─────────────────────────────────────────────────────
-// Proxy TMDB : recherche + enrichissement acteurs/genres
+// Proxy TMDB : recherche + enrichment acteurs/genres
 exports.searchTMDB = async (req, res) => {
   try {
     const { query } = req.query;
@@ -246,7 +278,7 @@ exports.getStats = async (req, res) => {
       rating:     lastEntry.rating,
       section:    lastEntry.section,
       comment:    lastEntry.comment,
-      watchedAt:  lastEntry.watchedAt, // date d'archivage (pas de sortie du film)
+      watchedAt:  lastEntry.watchedAt,
     } : null;
 
     // Films coups de cœur

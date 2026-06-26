@@ -4,12 +4,20 @@ const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'seenit_secret_key';
-const JWT_EXPIRES = '7d';
+const JWT_EXPIRES = '30d'; // 30 jours max, la règle des 7 jours d'inactivité est gérée côté verifyToken
 
-// Initialisation du client Google avec ta variable d'environnement
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-// ── REGISTER CLASSIQUE ────────────────────────────────────────────────────────
+// Helper : shape user renvoyée au frontend (toujours la même structure)
+const userPayload = (user) => ({
+  id:       user._id,
+  email:    user.email,
+  username: user.username,
+  theme:    user.theme,
+  iconique: user.iconique,   // boolean — le frontend s'en sert pour autoriser le thème Iconic
+});
+
+// ── REGISTER ─────────────────────────────────────────────────────────────────
 exports.register = async (req, res) => {
   try {
     const { email, password, username } = req.body;
@@ -21,22 +29,18 @@ exports.register = async (req, res) => {
     if (exists)
       return res.status(409).json({ message: 'Cet email est déjà utilisé' });
 
-    const hash = await bcrypt.hash(password, 12);
-    const user = await User.create({ email, password: hash, username });
-
+    const hash  = await bcrypt.hash(password, 12);
+    const user  = await User.create({ email, password: hash, username });
     const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
 
-    res.status(201).json({
-      token,
-      user: { id: user._id, email: user.email, username: user.username, theme: user.theme, iconique: user.iconique }
-    });
+    res.status(201).json({ token, user: userPayload(user) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 };
 
-// ── LOGIN CLASSIQUE ───────────────────────────────────────────────────────────
+// ── LOGIN ─────────────────────────────────────────────────────────────────────
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -53,90 +57,64 @@ exports.login = async (req, res) => {
     await user.save();
 
     const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
-
-    res.json({
-      token,
-      user: { id: user._id, email: user.email, username: user.username, theme: user.theme, iconique: user.iconique }
-    });
+    res.json({ token, user: userPayload(user) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 };
 
-// ── INSCRIPTION / CONNEXION GOOGLE ────────────────────────────────────────────
+// ── GOOGLE AUTH ───────────────────────────────────────────────────────────────
 exports.googleAuth = async (req, res) => {
-  console.log("Corps de la requête reçu par Google Auth:", req.body); // 👈 Pour le débogage
-
   try {
-    // On récupère le credential ainsi que l'email et le nom envoyés par le frontend
-    const { credential, email: frontEmail, name: frontName } = req.body;
+    const { credential, name: frontName } = req.body;
 
-    if (!credential) {
+    if (!credential)
       return res.status(400).json({ message: "Jeton d'authentification manquant." });
-    }
 
-    // 💡 Validation de l'Access Token (ya29...) directement auprès des serveurs Google
     const tokenInfo = await client.getTokenInfo(credential);
-    
-    // On extrait l'email sécurisé et l'identifiant unique (sub) validés par Google
-    const email = tokenInfo.email;
-    const googleId = tokenInfo.sub;
-    
-    // Comme getTokenInfo ne renvoie pas toujours le nom du profil, on utilise celui du front en priorité
-    const name = frontName || "Utilisateur SeenIt";
+    const email     = tokenInfo.email;
+    const googleId  = tokenInfo.sub;
+    const name      = frontName || 'Utilisateur SeenIt';
 
-    // --- TA LOGIQUE DE BASE DE DONNÉES (Inchangée) ---
     let user = await User.findOne({ email });
-
     if (!user) {
-      // Si l'utilisateur n'existe pas, on le crée
-      user = await User.create({
-        username: name,
-        email: email,
-        googleId: googleId,
-      });
+      user = await User.create({ username: name, email, googleId });
     } else {
-      // S'il existe, on met à jour sa dernière connexion et son googleId s'il ne l'avait pas
       user.lastSeen = new Date();
       if (!user.googleId) user.googleId = googleId;
       await user.save();
     }
 
-    // Génération de ton token JWT pour SeenIt
     const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
-    
-    // Réponse propre envoyée au frontend
-    res.status(200).json({ 
-      token, 
-      user: { id: user._id, email: user.email, username: user.username, theme: user.theme, iconique: user.iconique } 
-    });
-
+    res.status(200).json({ token, user: userPayload(user) });
   } catch (error) {
-    console.error("Erreur Google Auth:", error);
+    console.error('Erreur Google Auth:', error);
     res.status(500).json({ message: "Erreur lors de l'authentification Google" });
   }
 };
 
 // ── VERIFY TOKEN ──────────────────────────────────────────────────────────────
+// Appelé au démarrage de l'app pour restaurer la session
 exports.verifyToken = async (req, res) => {
   try {
     const user = await User.findById(req.userId).select('-password');
     if (!user)
       return res.status(404).json({ message: 'Utilisateur introuvable' });
 
-    const sevenDays = 7 * 24 * 60 * 60 * 1000;
-    if (Date.now() - new Date(user.lastSeen).getTime() > sevenDays) {
+    // Expiration par inactivité : 7 jours sans connexion → session morte
+    const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
+    if (Date.now() - new Date(user.lastSeen).getTime() > SEVEN_DAYS) {
       return res.status(401).json({ message: 'Session expirée par inactivité' });
     }
 
+    // Met à jour lastSeen à chaque vérification (maintient la session active)
     user.lastSeen = new Date();
     await user.save();
 
-    res.json({
-      user: { id: user._id, email: user.email, username: user.username, theme: user.theme, iconique: user.iconique }
-    });
+    res.json({ user: userPayload(user) });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 };
@@ -145,9 +123,19 @@ exports.verifyToken = async (req, res) => {
 exports.saveTheme = async (req, res) => {
   try {
     const { theme } = req.body;
+
+    // Sécurité : on ne laisse pas un non-iconique sauvegarder le thème iconic
+    if (theme === 'iconic') {
+      const user = await User.findById(req.userId);
+      if (!user || !user.iconique) {
+        return res.status(403).json({ message: 'Thème Iconic non débloqué' });
+      }
+    }
+
     await User.findByIdAndUpdate(req.userId, { theme });
     res.json({ success: true });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ message: 'Erreur serveur' });
   }
 };
