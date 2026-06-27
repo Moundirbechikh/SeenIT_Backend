@@ -5,7 +5,7 @@ const connectDB        = require("./db");
 const authRoutes       = require('./routes/authRoutes');
 const actorRoutes      = require('./routes/Actorroutes');
 const filmRoutes       = require('./routes/filmRoutes');
-const suggestionRoutes = require('./routes/suggestionRoutes'); // ← NOUVEAU
+const suggestionRoutes = require('./routes/Suggestionroutes'); // ← NOUVEAU
 
 const app = express();
 
