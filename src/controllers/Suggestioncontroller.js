@@ -4,29 +4,14 @@ const User       = require('../models/User');
 
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w500';
 
-// ── HELPER : clé de semaine ISO "YYYY-Www" (semaine commence le lundi) ────────
-// On utilise dimanche comme début de semaine SeenIt donc on adapte :
-// dimanche = début de semaine SeenIt → on calcule la semaine "YYYY-W{N}-SeenIt"
-// Pour simplifier, on utilise le dimanche local comme pivot.
+// ── HELPER : clé de semaine (Le pivot est le Dimanche) ────────
+// Chaque dimanche, cette fonction génère une nouvelle clé unique (ex: "2026-06-28")
 function getWeekKey(date = new Date()) {
-  // Trouve le dimanche le plus récent
   const d = new Date(date);
   const day = d.getDay(); // 0=dim, 1=lun, ...
   d.setDate(d.getDate() - day); // recule au dimanche
   d.setHours(0, 0, 0, 0);
-  // Clé = YYYY-MM-DD du dimanche
   return d.toISOString().slice(0, 10);
-}
-
-// ── HELPER : vérifie si aujourd'hui est un jour autorisé ─────────────────────
-// Règle : mardi OU mercredi MATIN (avant 12h00)
-function isAllowedDay(date = new Date()) {
-  const day  = date.getDay();   // 0=dim, 1=lun, 2=mar, 3=mer, 4=jeu, 5=ven, 6=sam
-  const hour = date.getHours();
-
-  if (day === 2) return true;                    // Mardi toute la journée ✅
-  if (day === 3 && hour < 12) return true;       // Mercredi avant midi ✅
-  return false;
 }
 
 // ── GET /api/suggestions/week — Toutes les suggestions de la semaine courante ─
@@ -38,10 +23,9 @@ exports.getWeeklySuggestions = async (req, res) => {
       .populate('userId', 'username email')
       .lean();
 
-    // Formatte pour le front
     const formatted = suggestions.map(s => ({
-      _id:    s._id,
-      weekKey: s.weekKey,
+      _id:      s._id,
+      weekKey:  s.weekKey,
       user: {
         _id:      s.userId._id,
         username: s.userId.username || s.userId.email?.split('@')[0] || 'Cinéphile',
@@ -68,7 +52,8 @@ exports.getMySuggestion = async (req, res) => {
     const suggestion = await Suggestion.findOne({ userId: req.userId, weekKey }).lean();
 
     if (!suggestion) {
-      return res.json({ suggestion: null, weekKey, canAdd: isAllowedDay(), remaining: 3 });
+      // S'il n'a pas encore de suggestion cette semaine, il peut en ajouter 3
+      return res.json({ suggestion: null, weekKey, canAdd: true, remaining: 3 });
     }
 
     const remaining = 3 - suggestion.films.length;
@@ -81,7 +66,7 @@ exports.getMySuggestion = async (req, res) => {
         })),
       },
       weekKey,
-      canAdd: isAllowedDay() && remaining > 0,
+      canAdd: remaining > 0, // Plus de contrainte de jour, juste le nombre restant
       remaining,
     });
   } catch (err) {
@@ -97,14 +82,6 @@ exports.addToSuggestion = async (req, res) => {
 
     if (!userFilmId)
       return res.status(400).json({ message: 'userFilmId est requis' });
-
-    // Vérifie le jour autorisé
-    if (!isAllowedDay()) {
-      return res.status(403).json({
-        message: 'Tu peux seulement ajouter le mardi ou le mercredi matin (avant 12h)',
-        canAdd: false,
-      });
-    }
 
     // Récupère le film de l'utilisateur
     const userFilm = await UserFilm.findOne({ _id: userFilmId, userId: req.userId })
@@ -124,13 +101,13 @@ exports.addToSuggestion = async (req, res) => {
 
     // Vérifie la limite de 3 films
     if (suggestion.films.length >= 3) {
-      return res.status(400).json({ message: 'Tu as déjà ajouté 3 films cette semaine' });
+      return res.status(400).json({ message: 'Tu as déjà ajouté 3 films cette semaine.' });
     }
 
     // Vérifie si le film est déjà dans la sélection
     const alreadyIn = suggestion.films.some(f => f.tmdbId === userFilm.tmdbId);
     if (alreadyIn) {
-      return res.status(409).json({ message: 'Ce film est déjà dans ta sélection de la semaine' });
+      return res.status(409).json({ message: 'Ce film est déjà dans ta sélection de la semaine.' });
     }
 
     // Ajoute le film
@@ -165,12 +142,6 @@ exports.addToSuggestion = async (req, res) => {
 // ── DELETE /api/suggestions/remove/:filmIndex — Retirer un film ───────────────
 exports.removeFromSuggestion = async (req, res) => {
   try {
-    if (!isAllowedDay()) {
-      return res.status(403).json({
-        message: 'Tu peux seulement modifier ta sélection le mardi ou le mercredi matin',
-      });
-    }
-
     const weekKey = getWeekKey();
     const { tmdbId } = req.params;
 
@@ -188,6 +159,4 @@ exports.removeFromSuggestion = async (req, res) => {
   }
 };
 
-// ── Helper exporté pour le cron job ──────────────────────────────────────────
 exports.getWeekKey = getWeekKey;
-exports.isAllowedDay = isAllowedDay;
